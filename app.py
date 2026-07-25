@@ -11,7 +11,7 @@ from openpyxl import Workbook
 # ==========================================
 # --- DATABASE MANAGEMENT ---
 # ==========================================
-DB_NAME = "doms_history.db"
+DB_NAME = "/app/doms_history.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)

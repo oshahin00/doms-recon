@@ -14,6 +14,9 @@ Vagrant.configure("2") do |config|
     # NEW LINE: Tell Vagrant to run our bash script when booting up!
     app.vm.provision "shell", path: "setup-app.sh"
 
+    # Expose Grafana to your Windows Host via port 3000 (Grafana's default port)
+    app.vm.network "forwarded_port", guest: 3000, host: 3000
+
     # Hardware Allocation: 2GB RAM, 2 CPUs
     app.vm.provider "virtualbox" do |vb|
       vb.name = "appserver"
