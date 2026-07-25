@@ -21,6 +21,11 @@ def process_files(file1, file2):
         
     df1.rename(columns={'Resolution Notes': 'Resolution Note'}, inplace=True)
     
+    # Safely initialize columns if they don't exist to prevent KeyErrors
+    for col in ['Description', 'Cause Category', 'Cause Code']:
+        if col not in df1.columns:
+            df1[col] = ''
+    
     # Read the second file
     xls = pd.ExcelFile(file2)
     df2 = pd.read_excel(file2, sheet_name=xls.sheet_names[0])
@@ -38,8 +43,36 @@ def process_files(file1, file2):
     merged_df['Date_dt'] = pd.to_datetime(merged_df['Date'], errors='coerce')
     filtered_df = merged_df[merged_df['Created_dt'] >= merged_df['Date_dt']]
     
-    # Select final columns
-    final_cols = ['Station No.', 'Number', 'Priority', 'Created', 'Summary', 'Resolution Note', 'Status', 'DOMS Model', 'Date']
+    # --- ADVANCED FILTERING: DOMS & PUMPS vs RFID ---
+    res_note = filtered_df['Resolution Note'].fillna('').str.lower()
+    summary = filtered_df['Summary'].fillna('').str.lower()
+    desc = filtered_df['Description'].fillna('').str.lower()
+    
+    # 1. Check if the Resolution Note explicitly fixes a DOMS or Pump issue
+    is_doms_pump_res = res_note.str.contains('doms|pump', regex=True)
+    
+    # 2. Check if the Resolution Note explicitly blames an RFID issue (False Positive)
+    is_rfid_res = res_note.str.contains('rfid', regex=True)
+    
+    # 3. Check if the Summary or Description mentioned DOMS or Pump initially
+    is_doms_pump_initial = summary.str.contains('doms|pump', regex=True) | desc.str.contains('doms|pump', regex=True)
+    
+    # Keep the row IF: 
+    # The resolution explicitly says doms/pump, OR 
+    # (It was reported as doms/pump initially AND the resolution didn't explicitly blame RFID)
+    target_mask = is_doms_pump_res | (is_doms_pump_initial & ~is_rfid_res)
+    
+    filtered_df = filtered_df[target_mask]
+    
+    # --- COLUMN SELECTION & ORDERING ---
+    final_cols = [
+        'Station No.', 'Number', 'Priority', 'Created', 'Summary', 
+        'Resolution Note', 'Status', 'Cause Category', 'Cause Code', 
+        'DOMS Model', 'Date'
+    ]
+    
+    # Ensure only existing columns are selected just in case to prevent crashes
+    final_cols = [col for col in final_cols if col in filtered_df.columns]
     final_df = filtered_df[final_cols]
     
     # Create Excel file in memory
@@ -97,8 +130,11 @@ if file1 and file2:
     try:
         excel_data, row_count = process_files(file1, file2)
         
-        st.write(f"**Processing Complete:** Found {row_count} matching records after applying date filters.")
-        
+        if row_count == 0:
+            st.warning("No records found matching the DOMS/PUMPS criteria or date filters.")
+        else:
+            st.write(f"**Processing Complete:** Found {row_count} matching records related to DOMS/Pumps.")
+            
         # Provide the download button
         st.download_button(
             label="Download Formatted Excel File",
