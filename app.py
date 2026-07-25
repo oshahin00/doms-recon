@@ -2,10 +2,63 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import sqlite3
+from datetime import datetime
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl import Workbook
 
+# ==========================================
+# --- DATABASE MANAGEMENT ---
+# ==========================================
+DB_NAME = "doms_history.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS run_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_date TEXT,
+            filename TEXT,
+            record_count INTEGER,
+            file_data BLOB
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_run_to_db(filename, record_count, file_data):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute('''
+        INSERT INTO run_history (run_date, filename, record_count, file_data)
+        VALUES (?, ?, ?, ?)
+    ''', (run_date, filename, record_count, file_data))
+    conn.commit()
+    conn.close()
+
+def get_history_metadata():
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query("SELECT id, run_date, filename, record_count FROM run_history ORDER BY run_date DESC", conn)
+    conn.close()
+    return df
+
+def get_file_from_db(record_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT file_data, filename FROM run_history WHERE id = ?", (record_id,))
+    result = c.fetchone()
+    conn.close()
+    return result
+
+# Initialize the DB when the app starts
+init_db()
+
+# ==========================================
+# --- CORE PROCESSING LOGIC ---
+# ==========================================
 def extract_first_number(area_str):
     if not isinstance(area_str, str):
         return None
@@ -13,7 +66,6 @@ def extract_first_number(area_str):
     return int(match.group()) if match else None
 
 def process_files(file1, file2):
-    # Read the first file (handling both CSV and Excel just in case)
     if file1.name.endswith('.csv'):
         df1 = pd.read_csv(file1)
     else:
@@ -21,44 +73,33 @@ def process_files(file1, file2):
         
     df1.rename(columns={'Resolution Notes': 'Resolution Note'}, inplace=True)
     
-    # Safely initialize columns if they don't exist to prevent KeyErrors
     for col in ['Description', 'Cause Category', 'Cause Code']:
         if col not in df1.columns:
             df1[col] = ''
     
-    # Read the second file
     xls = pd.ExcelFile(file2)
     df2 = pd.read_excel(file2, sheet_name=xls.sheet_names[0])
     df2.columns = df2.columns.str.strip()
     df2['Station No.'] = pd.to_numeric(df2['Station No.'], errors='coerce').astype('Int64')
     
-    # Extract station number from the Area column
     df1['Extracted_Station_No'] = df1['Area'].apply(extract_first_number).astype('Int64')
     
-    # Merge
     merged_df = pd.merge(df1, df2, left_on='Extracted_Station_No', right_on='Station No.', how='inner')
     
-    # Date Filtering (Created >= Date)
     merged_df['Created_dt'] = pd.to_datetime(merged_df['Created'], errors='coerce')
     merged_df['Date_dt'] = pd.to_datetime(merged_df['Date'], errors='coerce')
     filtered_df = merged_df[merged_df['Created_dt'] >= merged_df['Date_dt']]
     
-    # --- STRICT ADVANCED FILTERING ---
     res_note = filtered_df['Resolution Note'].fillna('').str.lower()
     summary = filtered_df['Summary'].fillna('').str.lower()
     desc = filtered_df['Description'].fillna('').str.lower()
     
-    # 1. Identify ANY record that mentions 'rfid'
     has_rfid = res_note.str.contains('rfid') | summary.str.contains('rfid') | desc.str.contains('rfid')
-    
-    # 2. Identify ANY record that mentions 'doms' or 'pump'
     has_doms_pump = res_note.str.contains('doms|pump') | summary.str.contains('doms|pump') | desc.str.contains('doms|pump')
     
-    # 3. Apply the strict rule
     target_mask = has_doms_pump & ~has_rfid
     filtered_df = filtered_df[target_mask]
     
-    # --- COLUMN SELECTION & ORDERING ---
     final_cols = [
         'Station No.', 'Number', 'Priority', 'Created', 'Summary', 
         'Resolution Note', 'Status', 'Cause Category', 'Cause Code', 
@@ -68,7 +109,6 @@ def process_files(file1, file2):
     final_cols = [col for col in final_cols if col in filtered_df.columns]
     final_df = filtered_df[final_cols]
     
-    # Create Excel file in memory
     output = io.BytesIO()
     wb = Workbook()
     ws = wb.active
@@ -77,7 +117,6 @@ def process_files(file1, file2):
     for r in dataframe_to_rows(final_df, index=False, header=True):
         ws.append(r)
         
-    # Styling
     header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True)
     thin_border = Border(left=Side(style='thin', color='D9D9D9'),
@@ -106,17 +145,13 @@ def process_files(file1, file2):
     wb.save(output)
     output.seek(0)
     
-    # Notice we now return the dataframe as well to build the live preview
     return output, final_df 
 
 # ==========================================
 # --- ENTERPRISE WEB INTERFACE & UI/UX ---
 # ==========================================
-
-# 1. Page Configuration (Must be the first Streamlit command)
 st.set_page_config(page_title="DOMS Recon", page_icon="⚙️", layout="wide")
 
-# 2. Custom CSS for button styling
 st.markdown("""
     <style>
     .stDownloadButton button {
@@ -130,30 +165,29 @@ st.markdown("""
         background-color: #1e3a68;
         color: white;
     }
+    .history-row {
+        padding: 10px 0px;
+        border-bottom: 1px solid #333;
+    }
     </style>
 """, unsafe_allow_html=True)
 
-# 3. Main Header and Instructions
 st.title("⚙️ DOMS Data Merge & Filter Tool")
 st.markdown("Automated incident reconciliation and filtering for DOMS and Pump hardware tickets.")
 
 with st.expander("ℹ️ Operating Instructions & Filtering Rules"):
     st.markdown("""
     * **Input:** Requires the raw Incidents Report and the DOMS Rollout schedule.
-    * **Logic:** Matches Station Numbers and filters out records where the Incident Creation Date precedes the Rollout Date.
     * **Strict Filtering:** Automatically isolates tickets explicitly mentioning `DOMS` or `Pumps` while systematically rejecting any ticket referencing `RFID`.
     """)
 
-# 4. Sidebar for Inputs
 with st.sidebar:
     st.header("📂 Data Input")
     file1 = st.file_uploader("1. Incidents Report (CSV/XLSX)", type=["csv", "xlsx"])
     file2 = st.file_uploader("2. DOMS Rollout Schedule (XLSX)", type=["xlsx"])
-    
     st.markdown("---")
     st.caption("Environment: Node 2 (App Server)")
 
-# 5. Execution Logic
 if file1 and file2:
     with st.spinner('Reconciling datasets and applying exclusion rules...'):
         try:
@@ -165,12 +199,16 @@ if file1 and file2:
             else:
                 st.success(f"✅ Processing Complete: Successfully isolated {row_count} validated records.")
                 
-                # Split the UI into two columns for the preview and the download button
-                col1, col2 = st.columns([4, 1])
+                # Generate dynamic filename
+                timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+                export_filename = f"DOMS_Recon_{timestamp_str}.xlsx"
                 
+                # Save to DB instantly
+                save_run_to_db(export_filename, row_count, excel_data.getvalue())
+                
+                col1, col2 = st.columns([4, 1])
                 with col1:
                     st.subheader("📊 Live Data Preview")
-                    # Display the first 15 rows interactively
                     st.dataframe(final_df.head(15), use_container_width=True)
                     st.caption(f"Showing top 15 of {row_count} records. Download the Excel file to view the complete dataset.")
                     
@@ -179,12 +217,50 @@ if file1 and file2:
                     st.download_button(
                         label="📥 Download Report",
                         data=excel_data,
-                        file_name="DOMS_Reconciliation_Result.xlsx",
+                        file_name=export_filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    
         except Exception as e:
-            st.error(f"❌ A structural error occurred during processing. Please verify column names match the system requirements. Error: {e}")
+            st.error(f"❌ A structural error occurred. Error: {e}")
 else:
-    # Default landing screen
     st.info("👈 Please upload both datasets in the sidebar menu to initiate the reconciliation process.")
+    
+    # --- DB HISTORY SECTION (Renders when waiting for input) ---
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.header("🗄️ Extraction History")
+    st.caption("Previous reconciliation runs are securely stored in the local SQLite database. You can download historical files below.")
+    
+    history_df = get_history_metadata()
+    
+    if history_df.empty:
+        st.write("No historical runs found in the database.")
+    else:
+        # Create a clean header row
+        h_col1, h_col2, h_col3, h_col4 = st.columns([2, 3, 2, 2])
+        h_col1.markdown("**Execution Date**")
+        h_col2.markdown("**Generated Filename**")
+        h_col3.markdown("**Records Found**")
+        h_col4.markdown("**Action**")
+        st.markdown("---")
+        
+        # Display the top 10 most recent runs
+        for index, row in history_df.head(10).iterrows():
+            r_col1, r_col2, r_col3, r_col4 = st.columns([2, 3, 2, 2])
+            
+            with r_col1:
+                st.write(row['run_date'])
+            with r_col2:
+                st.write(row['filename'])
+            with r_col3:
+                st.write(f"{row['record_count']} Validated Tickets")
+            with r_col4:
+                # Fetch the BLOB file data from the DB for the download button
+                db_file_data, db_filename = get_file_from_db(row['id'])
+                if db_file_data:
+                    st.download_button(
+                        label="📥 Download",
+                        data=db_file_data,
+                        file_name=db_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_btn_{row['id']}" # Unique key required by Streamlit
+                    )

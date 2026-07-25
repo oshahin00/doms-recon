@@ -26,10 +26,11 @@ echo "6. Running the application..."
 docker rm -f doms-container 2>/dev/null || true
 
 docker run -d \
-    --restart unless-stopped \
-    --name doms-container \
-    -p 8501:8501 \
-    doms-app \
-    streamlit run app.py --server.address=0.0.0.0 --server.enableCORS=false --server.enableXsrfProtection=false
+  --restart unless-stopped \
+  --name doms-container \
+  -v /opt/doms-recon:/app \
+  -p 8501:8501 \
+  doms-app \
+  streamlit run app.py --server.address=0.0.0.0 --server.enableCORS=false --server.enableXsrfProtection=false
 
 echo "✅ App Server Provisioning Complete!"
