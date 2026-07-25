@@ -43,24 +43,20 @@ def process_files(file1, file2):
     merged_df['Date_dt'] = pd.to_datetime(merged_df['Date'], errors='coerce')
     filtered_df = merged_df[merged_df['Created_dt'] >= merged_df['Date_dt']]
     
-    # --- ADVANCED FILTERING: DOMS & PUMPS vs RFID ---
+    # --- STRICT ADVANCED FILTERING ---
+    # Convert everything to lowercase for case-insensitive matching
     res_note = filtered_df['Resolution Note'].fillna('').str.lower()
     summary = filtered_df['Summary'].fillna('').str.lower()
     desc = filtered_df['Description'].fillna('').str.lower()
     
-    # 1. Check if the Resolution Note explicitly fixes a DOMS or Pump issue
-    is_doms_pump_res = res_note.str.contains('doms|pump', regex=True)
+    # 1. Identify ANY record that mentions 'rfid' in any of the three columns
+    has_rfid = res_note.str.contains('rfid') | summary.str.contains('rfid') | desc.str.contains('rfid')
     
-    # 2. Check if the Resolution Note explicitly blames an RFID issue (False Positive)
-    is_rfid_res = res_note.str.contains('rfid', regex=True)
+    # 2. Identify ANY record that mentions 'doms' or 'pump' in any of the three columns
+    has_doms_pump = res_note.str.contains('doms|pump') | summary.str.contains('doms|pump') | desc.str.contains('doms|pump')
     
-    # 3. Check if the Summary or Description mentioned DOMS or Pump initially
-    is_doms_pump_initial = summary.str.contains('doms|pump', regex=True) | desc.str.contains('doms|pump', regex=True)
-    
-    # Keep the row IF: 
-    # The resolution explicitly says doms/pump, OR 
-    # (It was reported as doms/pump initially AND the resolution didn't explicitly blame RFID)
-    target_mask = is_doms_pump_res | (is_doms_pump_initial & ~is_rfid_res)
+    # 3. Apply the strict rule: MUST have doms/pump AND MUST NOT have rfid
+    target_mask = has_doms_pump & ~has_rfid
     
     filtered_df = filtered_df[target_mask]
     
@@ -71,7 +67,7 @@ def process_files(file1, file2):
         'DOMS Model', 'Date'
     ]
     
-    # Ensure only existing columns are selected just in case to prevent crashes
+    # Ensure only existing columns are selected to prevent crashes
     final_cols = [col for col in final_cols if col in filtered_df.columns]
     final_df = filtered_df[final_cols]
     
@@ -133,7 +129,7 @@ if file1 and file2:
         if row_count == 0:
             st.warning("No records found matching the DOMS/PUMPS criteria or date filters.")
         else:
-            st.write(f"**Processing Complete:** Found {row_count} matching records related to DOMS/Pumps.")
+            st.write(f"**Processing Complete:** Found {row_count} matching records related to DOMS/Pumps (RFID completely excluded).")
             
         # Provide the download button
         st.download_button(
