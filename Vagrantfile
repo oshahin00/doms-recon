@@ -12,7 +12,7 @@ Vagrant.configure("2") do |config|
     app.vm.network "private_network", ip: "192.168.50.11"
     
     # NEW LINE: Tell Vagrant to run our bash script when booting up!
-    app.vm.provision "shell", path: "app.sh"
+    app.vm.provision "shell", path: "setup-app.sh"
 
     # Hardware Allocation: 2GB RAM, 2 CPUs
     app.vm.provider "virtualbox" do |vb|
