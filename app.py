@@ -44,20 +44,18 @@ def process_files(file1, file2):
     filtered_df = merged_df[merged_df['Created_dt'] >= merged_df['Date_dt']]
     
     # --- STRICT ADVANCED FILTERING ---
-    # Convert everything to lowercase for case-insensitive matching
     res_note = filtered_df['Resolution Note'].fillna('').str.lower()
     summary = filtered_df['Summary'].fillna('').str.lower()
     desc = filtered_df['Description'].fillna('').str.lower()
     
-    # 1. Identify ANY record that mentions 'rfid' in any of the three columns
+    # 1. Identify ANY record that mentions 'rfid'
     has_rfid = res_note.str.contains('rfid') | summary.str.contains('rfid') | desc.str.contains('rfid')
     
-    # 2. Identify ANY record that mentions 'doms' or 'pump' in any of the three columns
+    # 2. Identify ANY record that mentions 'doms' or 'pump'
     has_doms_pump = res_note.str.contains('doms|pump') | summary.str.contains('doms|pump') | desc.str.contains('doms|pump')
     
-    # 3. Apply the strict rule: MUST have doms/pump AND MUST NOT have rfid
+    # 3. Apply the strict rule
     target_mask = has_doms_pump & ~has_rfid
-    
     filtered_df = filtered_df[target_mask]
     
     # --- COLUMN SELECTION & ORDERING ---
@@ -67,7 +65,6 @@ def process_files(file1, file2):
         'DOMS Model', 'Date'
     ]
     
-    # Ensure only existing columns are selected to prevent crashes
     final_cols = [col for col in final_cols if col in filtered_df.columns]
     final_df = filtered_df[final_cols]
     
@@ -109,34 +106,85 @@ def process_files(file1, file2):
     wb.save(output)
     output.seek(0)
     
-    return output, len(final_df)
+    # Notice we now return the dataframe as well to build the live preview
+    return output, final_df 
 
-# --- Web Interface ---
-st.set_page_config(page_title="Data Merger", layout="centered")
+# ==========================================
+# --- ENTERPRISE WEB INTERFACE & UI/UX ---
+# ==========================================
 
-st.title("DOMS Data Merge & Filter Tool")
-st.write("Upload your incident report and rollout schedule to generate a formatted comparison sheet.")
+# 1. Page Configuration (Must be the first Streamlit command)
+st.set_page_config(page_title="DOMS Recon", page_icon="⚙️", layout="wide")
 
-file1 = st.file_uploader("Upload First Sheet (Incidents - CSV or XLSX)", type=["csv", "xlsx"])
-file2 = st.file_uploader("Upload Second Sheet (DOMS Rollout - XLSX)", type=["xlsx"])
+# 2. Custom CSS for button styling
+st.markdown("""
+    <style>
+    .stDownloadButton button {
+        width: 100%;
+        background-color: #2F5597;
+        color: white;
+        border-radius: 5px;
+        font-weight: bold;
+    }
+    .stDownloadButton button:hover {
+        background-color: #1e3a68;
+        color: white;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-if file1 and file2:
-    st.success("Files uploaded successfully. Processing...")
+# 3. Main Header and Instructions
+st.title("⚙️ DOMS Data Merge & Filter Tool")
+st.markdown("Automated incident reconciliation and filtering for DOMS and Pump hardware tickets.")
+
+with st.expander("ℹ️ Operating Instructions & Filtering Rules"):
+    st.markdown("""
+    * **Input:** Requires the raw Incidents Report and the DOMS Rollout schedule.
+    * **Logic:** Matches Station Numbers and filters out records where the Incident Creation Date precedes the Rollout Date.
+    * **Strict Filtering:** Automatically isolates tickets explicitly mentioning `DOMS` or `Pumps` while systematically rejecting any ticket referencing `RFID`.
+    """)
+
+# 4. Sidebar for Inputs
+with st.sidebar:
+    st.header("📂 Data Input")
+    file1 = st.file_uploader("1. Incidents Report (CSV/XLSX)", type=["csv", "xlsx"])
+    file2 = st.file_uploader("2. DOMS Rollout Schedule (XLSX)", type=["xlsx"])
     
-    try:
-        excel_data, row_count = process_files(file1, file2)
-        
-        if row_count == 0:
-            st.warning("No records found matching the DOMS/PUMPS criteria or date filters.")
-        else:
-            st.write(f"**Processing Complete:** Found {row_count} matching records related to DOMS/Pumps (RFID completely excluded).")
+    st.markdown("---")
+    st.caption("Environment: Node 2 (App Server)")
+
+# 5. Execution Logic
+if file1 and file2:
+    with st.spinner('Reconciling datasets and applying exclusion rules...'):
+        try:
+            excel_data, final_df = process_files(file1, file2)
+            row_count = len(final_df)
             
-        # Provide the download button
-        st.download_button(
-            label="Download Formatted Excel File",
-            data=excel_data,
-            file_name="Comparison_Result.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    except Exception as e:
-        st.error(f"An error occurred during processing. Please verify column names match the requirements. Error: {e}")
+            if row_count == 0:
+                st.warning("⚠️ No records found matching the DOMS/PUMPS criteria, or all records were excluded by the RFID filter.")
+            else:
+                st.success(f"✅ Processing Complete: Successfully isolated {row_count} validated records.")
+                
+                # Split the UI into two columns for the preview and the download button
+                col1, col2 = st.columns([4, 1])
+                
+                with col1:
+                    st.subheader("📊 Live Data Preview")
+                    # Display the first 15 rows interactively
+                    st.dataframe(final_df.head(15), use_container_width=True)
+                    st.caption(f"Showing top 15 of {row_count} records. Download the Excel file to view the complete dataset.")
+                    
+                with col2:
+                    st.subheader("Export")
+                    st.download_button(
+                        label="📥 Download Report",
+                        data=excel_data,
+                        file_name="DOMS_Reconciliation_Result.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    
+        except Exception as e:
+            st.error(f"❌ A structural error occurred during processing. Please verify column names match the system requirements. Error: {e}")
+else:
+    # Default landing screen
+    st.info("👈 Please upload both datasets in the sidebar menu to initiate the reconciliation process.")
