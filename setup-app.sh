@@ -1,10 +1,10 @@
 #!/bin/bash
 
 echo "1. Updating the Linux system..."
-apt-get update -y
+dnf update -y
 
 echo "2. Installing Docker and Git..."
-apt-get install -y docker.io git
+dnf install -y docker.io git
 
 echo "3. Starting the Docker engine..."
 systemctl start docker
@@ -49,7 +49,7 @@ global:
 scrape_configs:
     - job_name: 'appserver-hardware'
       static_configs:
-          - targets: ['192.168.50.11:9100']
+          - targets: ['192.168.60.30:9100']
 
 EOF
 

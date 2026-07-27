@@ -1,8 +1,8 @@
 #!/bin/bash 
 
 echo "1. Updating system and installing Nginx..." 
-apt-get update -y 
-apt-get install -y nginx 
+dnf update -y 
+dnf install -y nginx 
 
 echo "2. Configuring Nginx as a Reverse Proxy for Streamlit..." 
 cat <<EOF > /etc/nginx/sites-available/default
@@ -11,7 +11,7 @@ server {
     server_name _;
 
     location / {
-        proxy_pass http://192.168.50.11:8501/;
+        proxy_pass http://192.168.60.30:8501/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         
@@ -22,7 +22,7 @@ server {
     }
     # Dedicated block strictly for Streamlit WebSockets
     location ^~ /_stcore/stream {
-        proxy_pass http://192.168.50.11:8501/_stcore/stream;
+        proxy_pass http://192.168.60.30:8501/_stcore/stream;
         proxy_http_version 1.1;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header Host \$host;
