@@ -2,56 +2,89 @@ import streamlit as st
 import pandas as pd
 import re
 import io
-import sqlite3
 from datetime import datetime
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl import Workbook
+from sqlalchemy import create_engine, text
 
 # ==========================================
-# --- DATABASE MANAGEMENT (DOMS) ---
+# --- MSSQL DATABASE CONFIGURATION ---
 # ==========================================
-DB_NAME = "/app/doms_history.db"
+MSSQL_SERVER = "localhost\\SQLEXPRESS"                  # Update with your server name/IP if needed
+MSSQL_DATABASE = "OpsFlow_DB"               # Enterprise database name
+USE_WINDOWS_AUTH = True                     # True if using Windows Integrated Security
+
+if USE_WINDOWS_AUTH:
+    CONN_STR = f"mssql+pyodbc://{MSSQL_SERVER}/{MSSQL_DATABASE}?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server"
+else:
+    MSSQL_USER = "YOUR_USERNAME"
+    MSSQL_PASSWORD = "YOUR_PASSWORD"
+    CONN_STR = f"mssql+pyodbc://{MSSQL_USER}:{MSSQL_PASSWORD}@{MSSQL_SERVER}/{MSSQL_DATABASE}?driver=ODBC+Driver+17+for+SQL+Server"
+
+engine = create_engine(CONN_STR)
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS run_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_date TEXT,
-            filename TEXT,
-            record_count INTEGER,
-            file_data BLOB
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text('''
+                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='run_history' and xtype='U')
+                CREATE TABLE run_history (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    report_type VARCHAR(50),
+                    run_date VARCHAR(50),
+                    filename VARCHAR(255),
+                    record_count INT,
+                    file_data VARBINARY(MAX)
+                )
+            '''))
+    except Exception as e:
+        print(f"Database Initialization Error: {e}")
 
-def save_run_to_db(filename, record_count, file_data):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+def save_run_to_db(report_type, filename, record_count, file_data):
     run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute('''
-        INSERT INTO run_history (run_date, filename, record_count, file_data)
-        VALUES (?, ?, ?, ?)
-    ''', (run_date, filename, record_count, file_data))
-    conn.commit()
-    conn.close()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM run_history WHERE report_type = :report_type"), {"report_type": report_type})
+        conn.execute(
+            text("""
+                INSERT INTO run_history (report_type, run_date, filename, record_count, file_data) 
+                VALUES (:report_type, :run_date, :filename, :record_count, :file_data)
+            """),
+            {
+                "report_type": report_type, 
+                "run_date": run_date, 
+                "filename": filename, 
+                "record_count": record_count, 
+                "file_data": file_data
+            }
+        )
 
-def get_history_metadata():
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT id, run_date, filename, record_count FROM run_history ORDER BY run_date DESC", conn)
-    conn.close()
-    return df
+def get_history_metadata(report_type):
+    try:
+        query = text("SELECT id, run_date, filename, record_count FROM run_history WHERE report_type = :rtype ORDER BY run_date DESC")
+        df = pd.read_sql(query, engine, params={"rtype": report_type})
+        return df
+    except Exception as e:
+        return pd.DataFrame(columns=['id', 'run_date', 'filename', 'record_count'])
 
 def get_file_from_db(record_id):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT file_data, filename FROM run_history WHERE id = ?", (record_id,))
-    result = c.fetchone()
-    conn.close()
-    return result
+    try:
+        query = text("SELECT file_data, filename FROM run_history WHERE id = :rid")
+        with engine.connect() as conn:
+            result = conn.execute(query, {"rid": record_id}).fetchone()
+            if result:
+                return result[0], result[1]
+    except Exception as e:
+        pass
+    return None, None
+
+def delete_record_from_db(record_id):
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM run_history WHERE id = :rid"), {"rid": record_id})
+        return True
+    except Exception as e:
+        return False
 
 init_db()
 
@@ -111,12 +144,15 @@ def process_files(file1, file2):
     final_cols = [col for col in final_cols if col in filtered_df.columns]
     final_df = filtered_df[final_cols]
     
+    return final_df
+
+def generate_excel_bytes(df):
     output = io.BytesIO()
     wb = Workbook()
     ws = wb.active
     ws.title = "Comparison Results"
     
-    for r in dataframe_to_rows(final_df, index=False, header=True):
+    for r in dataframe_to_rows(df, index=False, header=True):
         ws.append(r)
         
     header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
@@ -146,37 +182,26 @@ def process_files(file1, file2):
     
     wb.save(output)
     output.seek(0)
-    
-    return output, final_df 
+    return output
 
 # ==========================================
-# --- ENTERPRISE WEB INTERFACE & UI/UX ---
+# --- WEB INTERFACE & UI/UX ---
 # ==========================================
-st.set_page_config(page_title="DOMS & MYF Tools", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="OpsFlow Studio", page_icon="⚙️", layout="wide")
 
 st.markdown("""
     <style>
-    .stDownloadButton button {
+    .stDownloadButton button, .stButton button {
         width: 100%;
-        background-color: #2F5597;
-        color: white;
         border-radius: 5px;
         font-weight: bold;
-    }
-    .stDownloadButton button:hover {
-        background-color: #1e3a68;
-        color: white;
-    }
-    .history-row {
-        padding: 10px 0px;
-        border-bottom: 1px solid #333;
     }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚙️ Enterprise Data Hub")
+st.title("⚙️ OpsFlow Studio")
 
-tab1, tab2 = st.tabs(["DOMS Data Merge Tool", "MYF Data & Incident Formatting"])
+tab1, tab2 = st.tabs(["DOMS Data Merge Tool", "MYF & Incident Management"])
 
 # -------------------------------------------------------------------------
 # TAB 1: DOMS RECONCILIATION
@@ -199,178 +224,205 @@ with tab1:
     if file1 and file2:
         with st.spinner('Reconciling datasets and applying exclusion rules...'):
             try:
-                excel_data, final_df = process_files(file1, file2)
-                row_count = len(final_df)
+                raw_final_df = process_files(file1, file2)
+                row_count_initial = len(raw_final_df)
                 
-                if row_count == 0:
+                if row_count_initial == 0:
                     st.warning("⚠️ No records found matching the DOMS/PUMPS criteria, or all records were excluded by the filters.")
                 else:
-                    st.success(f"✅ Processing Complete: Successfully isolated {row_count} validated records.")
+                    st.success(f"✅ Processing Complete: Successfully isolated {row_count_initial} validated records.")
+                    
+                    st.subheader("📊 Live Data Preview (Review or Delete unwanted rows below)")
+                    edited_preview_df = st.data_editor(raw_final_df, num_rows="delete", width='stretch', key="doms_editor")
+                    
+                    current_row_count = len(edited_preview_df)
+                    excel_data = generate_excel_bytes(edited_preview_df)
                     
                     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
                     export_filename = f"DOMS_Recon_{timestamp_str}.xlsx"
                     
-                    save_run_to_db(export_filename, row_count, excel_data.getvalue())
-                    
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.subheader("📊 Live Data Preview")
-                        st.dataframe(final_df.head(15), width='stretch')
-                        st.caption(f"Showing top 15 of {row_count} records. Download the Excel file to view the complete dataset.")
-                        
-                    with col2:
-                        st.subheader("Export")
+                    col_act1, col_act2 = st.columns([4, 1])
+                    with col_act1:
+                        if st.button("💾 Save Edited Report to Database", key="save_doms_db"):
+                            save_run_to_db("DOMS", export_filename, current_row_count, excel_data.getvalue())
+                            st.success("✅ Saved successfully to database history!")
+                    with col_act2:
                         st.download_button(
                             label="📥 Download Report",
                             data=excel_data,
                             file_name=export_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="doms_dl_new"
                         )
             except Exception as e:
-                st.error(f"❌ A structural error occurred. Error: {e}")
+                st.error(f"❌ A structural error occurred: {e}")
     else:
-        st.info("👈 Please upload both datasets to initiate the reconciliation process.")
+        st.info("👈 Please upload both datasets above to initiate the reconciliation process.")
         
         st.markdown("<br><br>", unsafe_allow_html=True)
-        st.header("🗄️ Extraction History")
-        st.caption("Previous reconciliation runs are securely stored in the local SQLite database.")
+        st.header("🗄️ DOMS Extraction History")
+        st.caption("Latest stored DOMS reconciliation run in Microsoft SQL Server.")
         
-        history_df = get_history_metadata()
+        history_df = get_history_metadata("DOMS")
         
         if history_df.empty:
-            st.write("No historical runs found in the database.")
+            st.write("No historical DOMS runs found in the database.")
         else:
-            h_col1, h_col2, h_col3, h_col4 = st.columns([2, 3, 2, 2])
+            h_col1, h_col2, h_col3, h_col4, h_col5, h_col6 = st.columns([2, 3, 1, 1, 1, 1])
             h_col1.markdown("**Execution Date**")
-            h_col2.markdown("**Generated Filename**")
-            h_col3.markdown("**Records Found**")
-            h_col4.markdown("**Action**")
+            h_col2.markdown("**Filename**")
+            h_col3.markdown("**Records**")
+            h_col4.markdown("**Download**")
+            h_col5.markdown("**Review**")
+            h_col6.markdown("**Delete**")
             st.markdown("---")
             
-            for index, row in history_df.head(10).iterrows():
-                r_col1, r_col2, r_col3, r_col4 = st.columns([2, 3, 2, 2])
-                with r_col1: st.write(row['run_date'])
-                with r_col2: st.write(row['filename'])
-                with r_col3: st.write(f"{row['record_count']} Validated Tickets")
+            for index, row in history_df.head(1).iterrows():
+                r_id = row['id']
+                r_col1, r_col2, r_col3, r_col4, r_col5, r_col6 = st.columns([2, 3, 1, 1, 1, 1])
+                with r_col1: st.write(str(row['run_date']))
+                with r_col2: st.write(str(row['filename']))
+                with r_col3: st.write(f"{row['record_count']}")
+                
+                db_file_data, db_filename = get_file_from_db(r_id)
+                
                 with r_col4:
-                    db_file_data, db_filename = get_file_from_db(row['id'])
                     if db_file_data:
-                        st.download_button(
-                            label="📥 Download",
-                            data=db_file_data,
-                            file_name=db_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"dl_btn_{row['id']}" 
-                        )
+                        st.download_button("📥", data=db_file_data, file_name=db_filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_doms_{r_id}")
+                with r_col5:
+                    if st.button("👁️ Review", key=f"rev_doms_{r_id}"):
+                        st.session_state[f"show_review_{r_id}"] = not st.session_state.get(f"show_review_{r_id}", False)
+                with r_col6:
+                    if st.button("🗑️ Delete", key=f"del_doms_{r_id}"):
+                        delete_record_from_db(r_id)
+                        st.rerun()
+                
+                if st.session_state.get(f"show_review_{r_id}", False) and db_file_data:
+                    st.info(f"Reviewing contents of: {db_filename}")
+                    rev_df = pd.read_excel(io.BytesIO(db_file_data))
+                    st.dataframe(rev_df, width='stretch')
 
 # -------------------------------------------------------------------------
-# TAB 2: MYF DATA & INCIDENT FORMATTING
+# TAB 2: MYF & INCIDENT MANAGEMENT (Professional Sub-tab Layout)
 # -------------------------------------------------------------------------
 with tab2:
-    st.header("Option 1: MYF Extraction Result Editor")
-    st.caption("Upload the Excel file generated by your local Outlook `.bat` script to review and edit the data.")
+    st.markdown("Manage ticket data audits, time corrections, and downstream incident cross-matching.")
     
-    myf_file = st.file_uploader("Upload MYF Results (Excel)", type=["xlsx"], key="myf_upload")
+    subtab1, subtab2 = st.tabs(["📋 Step 1: MYF Audit & Editor", "🔍 Step 2: Incident Cross-Matcher"])
     
-    # Store parsed MYF dataframe in session state so Option 2 can access it
-    if 'myf_reference_df' not in st.session_state:
-        st.session_state.myf_reference_df = None
+    # -------------------------------------------------------------------------
+    # SUB-TAB 1: MYF AUDIT & EDITOR
+    # -------------------------------------------------------------------------
+    with subtab1:
+        st.subheader("MYF Extraction Result Editor")
+        st.caption("Upload your generated MYF Excel extraction file to review, clean, and adjust timestamps interactively.")
+        
+        myf_file = st.file_uploader("Upload MYF Results (Excel)", type=["xlsx"], key="myf_upload")
+        
+        if 'myf_reference_df' not in st.session_state:
+            st.session_state.myf_reference_df = None
 
-    if myf_file:
-        try:
-            myf_bytes = io.BytesIO(myf_file.read())
-            xls_myf = pd.ExcelFile(myf_bytes)
-            sheet_names = xls_myf.sheet_names
-            
-            best_idx = 0
-            max_cols = 0
-            for idx, s in enumerate(sheet_names):
-                temp_df = pd.read_excel(myf_bytes, sheet_name=s)
-                if len(temp_df.columns) > max_cols:
-                    max_cols = len(temp_df.columns)
-                    best_idx = idx
-            
-            selected_sheet = st.selectbox("Select Excel Sheet", sheet_names, index=best_idx, key="myf_sheet_select")
-            
-            df_myf = pd.read_excel(myf_bytes, sheet_name=selected_sheet)
-            st.session_state.myf_reference_df = df_myf
-            
-            date_cols = ['Received Time', 'Action Start Time', 'Action End Time']
-            for col in date_cols:
-                if col in df_myf.columns:
-                    df_myf[col] = pd.to_datetime(df_myf[col], format='mixed', errors='coerce')
-            
-            unique_count = 0
-            for col in df_myf.columns:
-                if 'incident' in col.lower() and 'number' in col.lower():
-                    unique_count = df_myf[col].dropna().nunique()
-                    break
-            
-            st.metric(label="📊 Total Unique Tickets", value=unique_count)
-            st.info(f"💡 Loaded sheet: **{selected_sheet}**. Click directly into Date/Time cells to use the interactive date/time picker widget.")
-            
-            column_configurations = {}
-            for col in date_cols:
-                if col in df_myf.columns:
-                    column_configurations[col] = st.column_config.DatetimeColumn(
-                        col,
-                        format="DD-MM-YYYY HH:mm:ss",
-                        step=1,
-                    )
-            
-            edited_myf_df = st.data_editor(
-                df_myf, 
-                num_rows="dynamic", 
-                width='stretch',
-                column_config=column_configurations,
-                key="myf_editor"
-            )
-            
-            myf_output = io.BytesIO()
-            with pd.ExcelWriter(myf_output, engine='openpyxl') as writer:
-                edited_myf_df.to_excel(writer, index=False, sheet_name='Engineers Updated')
-                    
-            st.download_button(
-                label="📥 Export Updated MYF Data",
-                data=myf_output.getvalue(),
-                file_name=f"MYF_Updated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="myf_download_btn"
-            )
-        except Exception as e:
-            st.error(f"❌ Failed to load MYF Excel file: {e}")
-
-    st.markdown("---")
-    
-    st.header("Option 2: Incident File Formatter & Cross-Matcher")
-    st.caption("Upload a raw incident report. It will automatically match tickets against Option 1, remove unmatched records, and enforce strict column ordering.")
-    
-    incident_file = st.file_uploader("Upload Raw Incident Report (CSV/XLSX)", type=["csv", "xlsx"], key="inc_upload")
-    
-    if incident_file:
-        if st.button("🚀 Match & Format Incident Report", type="primary", key="match_inc_btn"):
+        if myf_file:
             try:
-                if incident_file.name.endswith('.csv'):
-                    df_raw_inc = pd.read_csv(incident_file)
-                else:
-                    df_raw_inc = pd.read_excel(incident_file)
-                    
-                df_raw_inc.rename(columns={'Resolution Note': 'Resolution Notes'}, inplace=True)
+                myf_bytes = io.BytesIO(myf_file.read())
+                xls_myf = pd.ExcelFile(myf_bytes)
+                sheet_names = xls_myf.sheet_names
                 
-                # Check if Option 1 reference data is available
-                if st.session_state.myf_reference_df is None:
-                    st.warning("⚠️ Please upload and load your MYF Results file in **Option 1** first so the engine knows which tickets to match against!")
-                else:
+                best_idx = 0
+                max_cols = 0
+                for idx, s in enumerate(sheet_names):
+                    temp_df = pd.read_excel(myf_bytes, sheet_name=s)
+                    if len(temp_df.columns) > max_cols:
+                        max_cols = len(temp_df.columns)
+                        best_idx = idx
+                
+                selected_sheet = st.selectbox("Select Excel Sheet", sheet_names, index=best_idx, key="myf_sheet_select")
+                
+                df_myf = pd.read_excel(myf_bytes, sheet_name=selected_sheet)
+                st.session_state.myf_reference_df = df_myf
+                
+                date_cols = ['Received Time', 'Action Start Time', 'Action End Time']
+                for col in date_cols:
+                    if col in df_myf.columns:
+                        df_myf[col] = pd.to_datetime(df_myf[col], format='mixed', errors='coerce')
+                
+                unique_count = 0
+                for col in df_myf.columns:
+                    if 'incident' in col.lower() and 'number' in col.lower():
+                        unique_count = df_myf[col].dropna().nunique()
+                        break
+                
+                st.metric(label="📊 Total Unique Tickets Loaded", value=unique_count)
+                st.info(f"💡 Active Sheet: **{selected_sheet}**. You can delete unwanted rows or use the interactive date/time pickers below.")
+                
+                column_configurations = {}
+                for col in date_cols:
+                    if col in df_myf.columns:
+                        column_configurations[col] = st.column_config.DatetimeColumn(
+                            col,
+                            format="DD-MM-YYYY HH:mm:ss",
+                            step=1,
+                        )
+                
+                edited_myf_df = st.data_editor(
+                    df_myf, 
+                    num_rows="delete", 
+                    width='stretch',
+                    column_config=column_configurations,
+                    key="myf_editor"
+                )
+                
+                myf_output = io.BytesIO()
+                with pd.ExcelWriter(myf_output, engine='openpyxl') as writer:
+                    edited_myf_df.to_excel(writer, index=False, sheet_name='Engineers Updated')
+                
+                myf_filename = f"MYF_Updated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    if st.button("💾 Save Updated MYF to Database", key="save_myf_db"):
+                        save_run_to_db("MYF_Update", myf_filename, len(edited_myf_df), myf_output.getvalue())
+                        st.success("✅ Saved successfully to database history!")
+                with col_m2:
+                    st.download_button(
+                        label="📥 Export Updated MYF Data",
+                        data=myf_output.getvalue(),
+                        file_name=myf_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="myf_download_btn"
+                    )
+            except Exception as e:
+                st.error(f"❌ Failed to load MYF Excel file: {e}")
+
+    # -------------------------------------------------------------------------
+    # SUB-TAB 2: INCIDENT CROSS-MATCHER (Auto-loads live preview on upload)
+    # -------------------------------------------------------------------------
+    with subtab2:
+        st.subheader("Incident File Formatter & Cross-Matcher")
+        st.caption("Cross-reference raw incident reports against your audited MYF dataset to isolate and format matched tickets.")
+        
+        if st.session_state.myf_reference_df is None:
+            st.warning("🔒 **Prerequisite Required:** Please upload and review your MYF Results file in **Step 1** first so the engine has a valid ticket list for cross-matching.")
+        else:
+            incident_file = st.file_uploader("Upload Raw Incident Report (CSV/XLSX)", type=["csv", "xlsx"], key="inc_upload")
+            
+            if incident_file:
+                try:
+                    if incident_file.name.endswith('.csv'):
+                        df_raw_inc = pd.read_csv(incident_file)
+                    else:
+                        df_raw_inc = pd.read_excel(incident_file)
+                        
+                    df_raw_inc.rename(columns={'Resolution Note': 'Resolution Notes'}, inplace=True)
+                    
                     myf_df = st.session_state.myf_reference_df
                     
-                    # Extract unique incident numbers from MYF reference data
                     myf_incident_col = None
                     for col in myf_df.columns:
                         if 'incident' in col.lower() and 'number' in col.lower():
                             myf_incident_col = col
                             break
                     
-                    # Find incident number column in raw incident report ('Number' or 'Incident Number')
                     inc_number_col = None
                     for candidate in ['Number', 'Incident Number', 'Incident']:
                         if candidate in df_raw_inc.columns:
@@ -378,14 +430,12 @@ with tab2:
                             break
                     
                     if not myf_incident_col or not inc_number_col:
-                        st.error(f"❌ Could not locate Incident Number columns. MYF col found: {myf_incident_col}, Incident Report col found: {inc_number_col}")
+                        st.error("❌ Could not locate matching Incident Number columns.")
                     else:
-                        # Normalize strings for clean matching
                         valid_tickets = set(myf_df[myf_incident_col].dropna().astype(str).str.strip().str.upper())
                         
-                        # Filter raw incidents to KEEP ONLY those present in Option 1 (remove unmatched)
-                        mask_match = df_raw_inc[inc_number_col].dropna().astype(str).str.strip().str.upper().isin(valid_tickets)
-                        df_matched = df_raw_inc[mask_match]
+                        match_mask = df_raw_inc[inc_number_col].astype(str).str.strip().str.upper().isin(valid_tickets).to_numpy()
+                        df_matched = df_raw_inc[match_mask]
                         
                         mandated_columns = [
                             "Number", "Priority", "Created", "Area", "Assigned To", "Summary", 
@@ -394,23 +444,80 @@ with tab2:
                             "Additional Comments", "Cause Category", "Cause Code", "First Assignment Group"
                         ]
                         
-                        final_ordered_cols = [col for col in mandated_columns if col in df_matched.columns]
+                        final_ordered_cols = [col for col in mandated_columns if col in df_raw_inc.columns]
                         df_formatted_inc = df_matched[final_ordered_cols]
                         
-                        matched_count = len(df_formatted_inc)
-                        st.success(f"✅ Matching Complete: Found and retained {matched_count} matching incident(s)!")
-                        st.dataframe(df_formatted_inc.head(15), width='stretch')
+                        st.success(f"✅ Matching Complete: Successfully retained {len(df_formatted_inc)} matching incident(s). Review or clean rows below:")
+                        
+                        edited_matched_inc = st.data_editor(df_formatted_inc, num_rows="delete", width='stretch', key="matched_inc_editor")
                         
                         inc_output = io.BytesIO()
                         with pd.ExcelWriter(inc_output, engine='openpyxl') as writer:
-                            df_formatted_inc.to_excel(writer, index=False, sheet_name='Formatted_Incidents')
+                            edited_matched_inc.to_excel(writer, index=False, sheet_name='Formatted_Incidents')
                         
-                        st.download_button(
-                            label="📥 Download Matched & Formatted Incidents",
-                            data=inc_output.getvalue(),
-                            file_name=f"Matched_Incidents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="inc_download_btn"
-                        )
-            except Exception as e:
-                st.error(f"❌ Failed to process and match incident file: {e}")
+                        inc_filename = f"Matched_Incidents_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                        
+                        col_i1, col_i2 = st.columns(2)
+                        with col_i1:
+                            if st.button("💾 Save Matched Report to Database", key="save_matched_db"):
+                                save_run_to_db("Matched_Incident", inc_filename, len(edited_matched_inc), inc_output.getvalue())
+                                st.success("✅ Saved successfully to database history!")
+                        with col_i2:
+                            st.download_button(
+                                label="📥 Download Formatted Incidents",
+                                data=inc_output.getvalue(),
+                                file_name=inc_filename,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="inc_download_btn"
+                            )
+                except Exception as e:
+                    st.error(f"❌ Failed to process and match incident file: {e}")
+
+    # --- TAB 2 HISTORY SECTION ---
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.header("🗄️ MYF & Incident Formatting History")
+    st.caption("Latest stored MYF updates and matched incident reports in Microsoft SQL Server.")
+    
+    history_myf = get_history_metadata("MYF_Update")
+    history_match = get_history_metadata("Matched_Incident")
+    
+    history_combined = pd.concat([history_myf, history_match])
+    if not history_combined.empty:
+        history_combined = history_combined.sort_values(by="run_date", ascending=False)
+
+    if history_combined.empty:
+        st.write("No historical MYF or Matched reports found in the database.")
+    else:
+        h_col1, h_col2, h_col3, h_col4, h_col5, h_col6 = st.columns([2, 3, 1, 1, 1, 1])
+        h_col1.markdown("**Execution Date**")
+        h_col2.markdown("**Filename**")
+        h_col3.markdown("**Records**")
+        h_col4.markdown("**Download**")
+        h_col5.markdown("**Review**")
+        h_col6.markdown("**Delete**")
+        st.markdown("---")
+        
+        for index, row in history_combined.head(2).iterrows():
+            r_id = row['id']
+            r_col1, r_col2, r_col3, r_col4, r_col5, r_col6 = st.columns([2, 3, 1, 1, 1, 1])
+            with r_col1: st.write(str(row['run_date']))
+            with r_col2: st.write(str(row['filename']))
+            with r_col3: st.write(f"{row['record_count']}")
+            
+            db_file_data, db_filename = get_file_from_db(r_id)
+            
+            with r_col4:
+                if db_file_data:
+                    st.download_button("📥", data=db_file_data, file_name=db_filename, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dl_tab2_{r_id}")
+            with r_col5:
+                if st.button("👁️ Review", key=f"rev_tab2_{r_id}"):
+                    st.session_state[f"show_review_{r_id}"] = not st.session_state.get(f"show_review_{r_id}", False)
+            with r_col6:
+                if st.button("🗑️ Delete", key=f"del_tab2_{r_id}"):
+                    delete_record_from_db(r_id)
+                    st.rerun()
+            
+            if st.session_state.get(f"show_review_{r_id}", False) and db_file_data:
+                st.info(f"Reviewing contents of: {db_filename}")
+                rev_df = pd.read_excel(io.BytesIO(db_file_data))
+                st.dataframe(rev_df, width='stretch')
