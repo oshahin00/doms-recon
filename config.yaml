@@ -1,0 +1,7 @@
+database:
+  # Use 'host.docker.internal' so the Docker container can reach your Desktop PostgreSQL instance
+  host: "host.docker.internal" 
+  port: 5432
+  username: "postgres"
+  password: "P@$$w0rd"
+  dbname: "OpsFlow_DB"

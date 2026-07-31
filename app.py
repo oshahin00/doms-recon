@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import yaml
 from datetime import datetime
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -9,33 +10,34 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine, text
 
 # ==========================================
-# --- MSSQL DATABASE CONFIGURATION ---
+# --- CONFIGURATION (YAML) ---
 # ==========================================
-MSSQL_SERVER = "localhost\\SQLEXPRESS"                  # Update with your server name/IP if needed
-MSSQL_DATABASE = "OpsFlow_DB"               # Enterprise database name
-USE_WINDOWS_AUTH = True                     # True if using Windows Integrated Security
+# Load configurations from config.yaml
+try:
+    with open("config.yaml", "r") as file:
+        config = yaml.safe_load(file)
+    db_cfg = config['database']
+except FileNotFoundError:
+    st.error("Configuration file 'config.yaml' not found. Please create it.")
+    st.stop()
 
-if USE_WINDOWS_AUTH:
-    CONN_STR = f"mssql+pyodbc://{MSSQL_SERVER}/{MSSQL_DATABASE}?trusted_connection=yes&driver=ODBC+Driver+17+for+SQL+Server"
-else:
-    MSSQL_USER = "YOUR_USERNAME"
-    MSSQL_PASSWORD = "YOUR_PASSWORD"
-    CONN_STR = f"mssql+pyodbc://{MSSQL_USER}:{MSSQL_PASSWORD}@{MSSQL_SERVER}/{MSSQL_DATABASE}?driver=ODBC+Driver+17+for+SQL+Server"
+# PostgreSQL connection string formulation
+CONN_STR = f"postgresql+psycopg2://{db_cfg['username']}:{db_cfg['password']}@{db_cfg['host']}:{db_cfg['port']}/{db_cfg['dbname']}"
 
 engine = create_engine(CONN_STR)
 
 def init_db():
     try:
         with engine.begin() as conn:
+            # Updated for PostgreSQL: SERIAL for auto-increment, BYTEA for files
             conn.execute(text('''
-                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='run_history' and xtype='U')
-                CREATE TABLE run_history (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS run_history (
+                    id SERIAL PRIMARY KEY,
                     report_type VARCHAR(50),
                     run_date VARCHAR(50),
                     filename VARCHAR(255),
                     record_count INT,
-                    file_data VARBINARY(MAX)
+                    file_data BYTEA
                 )
             '''))
     except Exception as e:
@@ -44,7 +46,7 @@ def init_db():
 def save_run_to_db(report_type, filename, record_count, file_data):
     run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM run_history WHERE report_type = :report_type"), {"report_type": report_type})
+        # BUG FIX: The DELETE statement was removed to preserve historical runs
         conn.execute(
             text("""
                 INSERT INTO run_history (report_type, run_date, filename, record_count, file_data) 
@@ -261,7 +263,7 @@ with tab1:
         
         st.markdown("<br><br>", unsafe_allow_html=True)
         st.header("🗄️ DOMS Extraction History")
-        st.caption("Latest stored DOMS reconciliation run in Microsoft SQL Server.")
+        st.caption("Latest stored DOMS reconciliation run in PostgreSQL.")
         
         history_df = get_history_metadata("DOMS")
         
@@ -303,7 +305,7 @@ with tab1:
                     st.dataframe(rev_df, width='stretch')
 
 # -------------------------------------------------------------------------
-# TAB 2: MYF & INCIDENT MANAGEMENT (Professional Sub-tab Layout)
+# TAB 2: MYF & INCIDENT MANAGEMENT
 # -------------------------------------------------------------------------
 with tab2:
     st.markdown("Manage ticket data audits, time corrections, and downstream incident cross-matching.")
@@ -395,7 +397,7 @@ with tab2:
                 st.error(f"❌ Failed to load MYF Excel file: {e}")
 
     # -------------------------------------------------------------------------
-    # SUB-TAB 2: INCIDENT CROSS-MATCHER (Auto-loads live preview on upload)
+    # SUB-TAB 2: INCIDENT CROSS-MATCHER
     # -------------------------------------------------------------------------
     with subtab2:
         st.subheader("Incident File Formatter & Cross-Matcher")
@@ -476,7 +478,7 @@ with tab2:
     # --- TAB 2 HISTORY SECTION ---
     st.markdown("<br><br>", unsafe_allow_html=True)
     st.header("🗄️ MYF & Incident Formatting History")
-    st.caption("Latest stored MYF updates and matched incident reports in Microsoft SQL Server.")
+    st.caption("Latest stored MYF updates and matched incident reports in PostgreSQL.")
     
     history_myf = get_history_metadata("MYF_Update")
     history_match = get_history_metadata("Matched_Incident")
